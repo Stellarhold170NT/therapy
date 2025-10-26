@@ -12,9 +12,12 @@ from sqlalchemy.orm import Session
 from database.connection import get_db
 from models.rag_config import RAGConfig
 from models.model import Model
+from services.web_scraper import query_web_scraper
 from cachetools import TTLCache
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+import ollama
+import json
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -218,35 +221,140 @@ def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
                 }
                 print(f"[DEBUG] Stored debug info for session: {req.session_id}")
 
-                # Create RAG prompt template with context
-                template = ChatPromptTemplate.from_messages([
-                    ("system", f"""Bạn là chuyên gia tư vấn CV chuyên nghiệp từ Viettel.
+                # Try Ollama native tool calling first
+                try:
+                    print(f"[Ollama Tool] Attempting tool calling with model: {llm_model.model_name}")
+
+                    # Get chat history for context
+                    history_msgs = get_session_history(req.session_id).messages
+                    chat_history = []
+                    for msg in history_msgs[-5:]:  # Last 5 messages
+                        if msg.type == "human":
+                            chat_history.append({"role": "user", "content": msg.content})
+                        elif msg.type == "ai":
+                            chat_history.append({"role": "assistant", "content": msg.content})
+
+                    # System message with RAG context
+                    system_message = {
+                        'role': 'system',
+                        'content': f"""Bạn là chuyên gia tư vấn CV chuyên nghiệp từ Viettel.
+
+Context từ knowledge base:
+{context_text}
+
+Hướng dẫn:
+1. Ưu tiên sử dụng context ở trên để trả lời
+2. Nếu context không đủ hoặc câu hỏi cần thông tin mới/thời gian thực từ web, hãy sử dụng tool query_web_scraper
+3. Trả lời bằng tiếng Việt một cách chuyên nghiệp"""
+                    }
+
+                    # User message
+                    user_message = {'role': 'user', 'content': req.message}
+
+                    # Build messages list
+                    messages = [system_message] + chat_history + [user_message]
+
+                    # First API call with tools
+                    response = ollama.chat(
+                        model=llm_model.model_name,
+                        messages=messages,
+                        tools=[
+                            {
+                                'type': 'function',
+                                'function': {
+                                    'name': 'query_web_scraper',
+                                    'description': 'Scrapes content from a web page and returns structured data with titles, links, and content. Use this when you need current/real-time information from the internet.',
+                                    'parameters': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'url': {
+                                                'type': 'string',
+                                                'description': 'The URL of the web page to scrape (must start with http:// or https://)',
+                                            },
+                                        },
+                                        'required': ['url'],
+                                    },
+                                },
+                            },
+                        ]
+                    )
+
+                    # Check if model used tool
+                    if response['message'].get('tool_calls'):
+                        print(f"[Ollama Tool] Model decided to use tools")
+
+                        # Append assistant's response
+                        messages.append(response['message'])
+
+                        # Execute tools
+                        available_functions = {'query_web_scraper': query_web_scraper}
+
+                        for tool in response['message']['tool_calls']:
+                            function_name = tool['function']['name']
+                            function_args = tool['function']['arguments']
+
+                            print(f"[Ollama Tool] Calling {function_name} with URL: {function_args.get('url')}")
+
+                            # Call the function
+                            function_to_call = available_functions[function_name]
+                            function_result = function_to_call(function_args['url'])
+
+                            # Add function response to messages
+                            messages.append({
+                                'role': 'tool',
+                                'content': json.dumps(function_result),
+                            })
+
+                        # Second API call with tool results
+                        print(f"[Ollama Tool] Getting final response with tool results")
+                        final_response = ollama.chat(model=llm_model.model_name, messages=messages)
+                        final_answer = final_response['message']['content']
+
+                    else:
+                        # No tool used, just use the response
+                        print(f"[Ollama Tool] Model did not use tools, answering directly")
+                        final_answer = response['message']['content']
+
+                    # Save to history
+                    session_history = get_session_history(req.session_id)
+                    session_history.add_user_message(req.message)
+                    session_history.add_ai_message(final_answer)
+
+                    # Stream the final answer character by character
+                    for char in final_answer:
+                        yield char
+
+                except Exception as tool_error:
+                    # Fallback to simple RAG chain if tool calling fails
+                    print(f"[Ollama Tool] Error: {str(tool_error)}, falling back to simple chain")
+                    import traceback
+                    print(f"[Ollama Tool] Traceback: {traceback.format_exc()[:500]}")
+
+                    # Simple LangChain fallback
+                    template = ChatPromptTemplate.from_messages([
+                        ("system", f"""Bạn là chuyên gia tư vấn CV chuyên nghiệp từ Viettel.
 
 Context từ knowledge base:
 {context_text}
 
 Hãy sử dụng context ở trên để trả lời câu hỏi của người dùng."""),
-                    ("placeholder", "{{history}}"),
-                    ("human", "{question}")
-                ])
+                        ("placeholder", "{{history}}"),
+                        ("human", "{question}")
+                    ])
 
-                # Create chain with RAG context
-                chain = template | llm | StrOutputParser()
+                    chain = template | llm | StrOutputParser()
+                    history = RunnableWithMessageHistory(
+                        chain,
+                        get_session_history,
+                        input_messages_key="question",
+                        history_messages_key="history"
+                    )
 
-                # Wrap with message history
-                history = RunnableWithMessageHistory(
-                    chain,
-                    get_session_history,
-                    input_messages_key="question",
-                    history_messages_key="history"
-                )
-
-                # Stream response
-                for chunk in history.stream(
-                    {"question": req.message},
-                    config={"configurable": {"session_id": req.session_id}}
-                ):
-                    yield chunk
+                    for chunk in history.stream(
+                        {"question": req.message},
+                        config={"configurable": {"session_id": req.session_id}}
+                    ):
+                        yield chunk
 
             except Exception as e:
                 print(f"Error in RAG retrieval: {str(e)}")

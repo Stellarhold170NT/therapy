@@ -19,10 +19,12 @@ langchain-ollama
 langchain-chroma
 chromadb
 
-# Agent Tools
+# Ollama SDK for native tool calling
+ollama
+
+# Web scraping tools
 playwright
-nest-asyncio
-langchain-experimental
+beautifulsoup4
 
 # Caching
 cachetools
