@@ -19,12 +19,8 @@ langchain-ollama
 langchain-chroma
 chromadb
 
-# Ollama SDK for native tool calling
-ollama
-
-# Web scraping tools
-playwright
-beautifulsoup4
+# Wikipedia tool for agent
+wikipedia
 
 # Caching
 cachetools

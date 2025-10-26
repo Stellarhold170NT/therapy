@@ -8,16 +8,16 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+import ollama
+import json
+import os
 from sqlalchemy.orm import Session
 from database.connection import get_db
 from models.rag_config import RAGConfig
 from models.model import Model
-from services.web_scraper import query_web_scraper
 from cachetools import TTLCache
 from pathlib import Path
 from typing import Optional, Dict, List, Any
-import ollama
-import json
 
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -221,20 +221,17 @@ def chat_stream(req: ChatRequest, db: Session = Depends(get_db)):
                 }
                 print(f"[DEBUG] Stored debug info for session: {req.session_id}")
 
-                # Try Ollama native tool calling first
+                # Try Ollama native web search with tool calling
                 try:
-                    print(f"[Ollama Tool] Attempting tool calling with model: {llm_model.model_name}")
+                    # Check if API key is available
+                    api_key = os.getenv('OLLAMA_API_KEY')
+                    if not api_key:
+                        print("[Web Search] No OLLAMA_API_KEY found, skipping web search")
+                        raise Exception("No OLLAMA_API_KEY")
 
-                    # Get chat history for context
-                    history_msgs = get_session_history(req.session_id).messages
-                    chat_history = []
-                    for msg in history_msgs[-5:]:  # Last 5 messages
-                        if msg.type == "human":
-                            chat_history.append({"role": "user", "content": msg.content})
-                        elif msg.type == "ai":
-                            chat_history.append({"role": "assistant", "content": msg.content})
+                    print(f"[Web Search] Using Ollama web_search tool")
 
-                    # System message with RAG context
+                    # Build messages with RAG context
                     system_message = {
                         'role': 'system',
                         'content': f"""Bạn là chuyên gia tư vấn CV chuyên nghiệp từ Viettel.
@@ -243,94 +240,87 @@ Context từ knowledge base:
 {context_text}
 
 Hướng dẫn:
-1. Ưu tiên sử dụng context ở trên để trả lời
-2. Nếu context không đủ hoặc câu hỏi cần thông tin mới/thời gian thực từ web, hãy sử dụng tool query_web_scraper
+1. Ưu tiên sử dụng Context từ knowledge base ở trên để trả lời
+2. Nếu Context không đủ hoặc cần thông tin thời gian thực, sử dụng web_search tool
 3. Trả lời bằng tiếng Việt một cách chuyên nghiệp"""
                     }
 
-                    # User message
-                    user_message = {'role': 'user', 'content': req.message}
+                    messages = [system_message, {'role': 'user', 'content': req.message}]
 
-                    # Build messages list
-                    messages = [system_message] + chat_history + [user_message]
-
-                    # First API call with tools
+                    # First call with tools
                     response = ollama.chat(
                         model=llm_model.model_name,
                         messages=messages,
-                        tools=[
-                            {
-                                'type': 'function',
-                                'function': {
-                                    'name': 'query_web_scraper',
-                                    'description': 'Scrapes content from a web page and returns structured data with titles, links, and content. Use this when you need current/real-time information from the internet.',
-                                    'parameters': {
-                                        'type': 'object',
-                                        'properties': {
-                                            'url': {
-                                                'type': 'string',
-                                                'description': 'The URL of the web page to scrape (must start with http:// or https://)',
-                                            },
-                                        },
-                                        'required': ['url'],
-                                    },
-                                },
-                            },
-                        ]
+                        tools=[ollama.web_search, ollama.web_fetch]
                     )
 
-                    # Check if model used tool
+                    messages.append(response['message'])
+
+                    # Check if model used tools
                     if response['message'].get('tool_calls'):
-                        print(f"[Ollama Tool] Model decided to use tools")
+                        print(f"[Web Search] Model decided to use tools")
 
-                        # Append assistant's response
-                        messages.append(response['message'])
+                        # Execute tool calls
+                        for tool_call in response['message']['tool_calls']:
+                            func_name = tool_call['function']['name']
+                            args = tool_call['function']['arguments']
 
-                        # Execute tools
-                        available_functions = {'query_web_scraper': query_web_scraper}
+                            print(f"[Web Search] Calling {func_name} with args: {args}")
 
-                        for tool in response['message']['tool_calls']:
-                            function_name = tool['function']['name']
-                            function_args = tool['function']['arguments']
+                            try:
+                                if func_name == 'web_search':
+                                    result = ollama.web_search(**args)
+                                elif func_name == 'web_fetch':
+                                    result = ollama.web_fetch(**args)
+                                else:
+                                    result = f"Unknown tool: {func_name}"
 
-                            print(f"[Ollama Tool] Calling {function_name} with URL: {function_args.get('url')}")
+                                print(f"[Web Search] Got {len(str(result))} chars result")
 
-                            # Call the function
-                            function_to_call = available_functions[function_name]
-                            function_result = function_to_call(function_args['url'])
+                                # Add tool result to messages
+                                messages.append({
+                                    'role': 'tool',
+                                    'content': str(result)[:8000],  # Limit to 8000 chars
+                                })
 
-                            # Add function response to messages
-                            messages.append({
-                                'role': 'tool',
-                                'content': json.dumps(function_result),
-                            })
+                            except Exception as tool_error:
+                                print(f"[Web Search] Tool error: {str(tool_error)}")
+                                messages.append({
+                                    'role': 'tool',
+                                    'content': f"Error: {str(tool_error)}"
+                                })
 
-                        # Second API call with tool results
-                        print(f"[Ollama Tool] Getting final response with tool results")
-                        final_response = ollama.chat(model=llm_model.model_name, messages=messages)
-                        final_answer = final_response['message']['content']
+                        # Second call with tool results
+                        print(f"[Web Search] Getting final response with tool results")
+                        final_response = ollama.chat(
+                            model=llm_model.model_name,
+                            messages=messages
+                        )
+                        output = final_response['message']['content']
 
                     else:
-                        # No tool used, just use the response
-                        print(f"[Ollama Tool] Model did not use tools, answering directly")
-                        final_answer = response['message']['content']
+                        # No tool used
+                        print(f"[Web Search] Model did not use tools, answering directly")
+                        output = response['message']['content']
+
+                    print(f"[Web Search] Got output length: {len(output) if output else 0}")
 
                     # Save to history
                     session_history = get_session_history(req.session_id)
                     session_history.add_user_message(req.message)
-                    session_history.add_ai_message(final_answer)
+                    session_history.add_ai_message(output)
 
-                    # Stream the final answer character by character
-                    for char in final_answer:
+                    # Stream the result
+                    for char in output:
                         yield char
 
-                except Exception as tool_error:
-                    # Fallback to simple RAG chain if tool calling fails
-                    print(f"[Ollama Tool] Error: {str(tool_error)}, falling back to simple chain")
+                except Exception as web_search_error:
+                    # Fallback to simple RAG chain
+                    print(f"[Web Search] Error: {str(web_search_error)}, falling back to simple RAG chain")
                     import traceback
-                    print(f"[Ollama Tool] Traceback: {traceback.format_exc()[:500]}")
+                    print(f"[Agent] Traceback: {traceback.format_exc()[:500]}")
 
-                    # Simple LangChain fallback
+                    # Simple RAG chain fallback
                     template = ChatPromptTemplate.from_messages([
                         ("system", f"""Bạn là chuyên gia tư vấn CV chuyên nghiệp từ Viettel.
 

@@ -109,3 +109,48 @@ def query_web_scraper(url: str) -> dict:
     """
     scraper = WebScraper(headless=True)
     return scraper.query_page_content(url)
+
+
+def search_web(query: str) -> dict:
+    """
+    Search the web using DuckDuckGo and return results.
+    Use this when you need to find information but don't have a specific URL.
+
+    Args:
+        query: The search query (e.g., "xu hướng tuyển dụng 2025")
+
+    Returns:
+        dict with search results (titles, links, snippets)
+    """
+    try:
+        from duckduckgo_search import DDGS
+
+        print(f"[DuckDuckGo] Searching for: {query}")
+
+        results = []
+        with DDGS() as ddgs:
+            # Get top 5 results
+            for r in ddgs.text(query, max_results=5):
+                results.append({
+                    'title': r.get('title', ''),
+                    'link': r.get('href', ''),
+                    'snippet': r.get('body', '')
+                })
+
+        print(f"[DuckDuckGo] Found {len(results)} results")
+
+        return {
+            "query": query,
+            "success": True,
+            "results": results,
+            "num_results": len(results)
+        }
+
+    except Exception as e:
+        print(f"[DuckDuckGo] Error: {str(e)}")
+        return {
+            "query": query,
+            "success": False,
+            "error": str(e),
+            "results": []
+        }

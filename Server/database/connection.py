@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent  # Server directory
 ENV_PATH = BASE_DIR / ".env"
 
 # Load .env nếu có
