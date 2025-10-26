@@ -7,15 +7,25 @@ from schemas.user_schema import UserRegister, UserLogin, UserOut
 from auth.auth import create_access_token, get_current_user
 
 
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+import bcrypt
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    """Hash password với bcrypt"""
+    password_bytes = password.encode('utf-8')
+    # Bcrypt limit 72 bytes, truncate nếu cần
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password_bytes, salt).decode('utf-8')
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    """Verify password với bcrypt"""
+    password_bytes = plain_password.encode('utf-8')
+    # Bcrypt limit 72 bytes, truncate nếu cần
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+    hashed_bytes = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(password_bytes, hashed_bytes)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -50,8 +60,15 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
     token = create_access_token(data={"sub": existing.username})
     return {
         "access_token": token,
-        "token_type": "bearer"
+        "token_type": "bearer",
+        "username": existing.username,
+        "role": existing.role
     }
+
+@router.get("/me", response_model=UserOut)
+def get_current_user_info(current_user: User = Depends(get_current_user)):
+    """Lấy thông tin user hiện tại (để verify token)"""
+    return current_user
 
 @router.get("/", response_model=list[UserOut])
 def list_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

@@ -1,0 +1,28 @@
+# FastAPI and Server dependencies
+fastapi
+uvicorn[standard]
+sqlalchemy
+pymysql
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+python-dotenv
+
+# PDF Processing
+pypdf2
+
+# RAG and LangChain dependencies (stable compatible versions)
+langchain
+langchain-community
+langchain-text-splitters
+langchain-ollama
+langchain-chroma
+chromadb
+
+# Agent Tools
+playwright
+nest-asyncio
+langchain-experimental
+
+# Caching
+cachetools

@@ -1,12 +1,13 @@
 from fastapi import FastAPI
-from services import user_service,chat_service
+from services import user_service, chat_service, rag_service, history_service
 
 app = FastAPI(title="Backend API")
 
-# Register router của user_service
-
+# Register routers
 app.include_router(user_service.router)
 app.include_router(chat_service.router)
+app.include_router(rag_service.router)
+app.include_router(history_service.router)
 
 @app.get("/status")
 def get_status():
